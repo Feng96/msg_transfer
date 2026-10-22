@@ -1,21 +1,23 @@
 # 消息传输助手
 
-一个免登录的文字聊天网页。手机和电脑打开**同一个完整房间链接**，即可发送消息并查看共享历史记录。前端每 3 秒检查新消息，消息保存在 Sites D1 数据库。
+免登录的多端文字聊天网页。首页列出房间；创建房间时设置名称和 6 位数字密码。手机和电脑进入同一房间后可以发送消息、查看历史，页面每 3 秒检查新消息。
 
 ## 使用
 
-1. 打开网页，发送第一条消息。
-2. 点“分享链接”，将完整链接发到另一台设备。链接中的 `#r=...` 是房间密钥，不能省略。
-3. 两台设备打开同一链接，就能看到同一段聊天。当前设备会记住最近使用的房间。
+1. 打开[网页](https://msg-transfer-feng96.yinanfeng96.chatgpt.site)，创建房间并记住密码。
+2. 在另一台设备打开同一个网页，从房间列表选择房间，输入密码。
+3. 分享房间地址时，网址只包含房间 ID；密码需单独告知。已解锁的设备在 30 天内保留安全会话。
 
-任何获得完整链接的人都可以读写该房间。请勿在公开位置发布链接。这个项目目前只传输文字和网址，不传文件。
+房间名称公开，消息需要房间密码或有效会话才能读取。6 位数字密码容易猜测，服务端限制创建频率和密码尝试次数。密码仅通过 HTTPS 发送用于验证，不写入网址、浏览器存储或数据库；数据库保存随机加盐、使用服务端秘密 `ROOM_PEPPER` 计算的验证值。浏览器会话使用 `HttpOnly`、`Secure` Cookie。站点管理员仍可读取服务器保存的消息；本项目不是端到端加密聊天。
 
-## 开发与部署
+如果浏览器里还有旧版长链接，首页会提示将旧历史导入一个密码房间。旧链接密钥导入后不再保存在浏览器存储中。
 
-- `web/`：聊天页面、样式和浏览器逻辑。
-- `worker/index.js`：消息 API，房间密钥验证、限额和页面响应。
-- `drizzle/0000_messages.sql`：D1 数据库迁移。
-- `.openai/hosting.json`：Sites 项目 ID 和 D1 绑定。
+## 源码与部署
 
-无需安装 npm 依赖。使用 `node scripts/build.mjs` 构建，`node scripts/validate-artifact.mjs` 验证打包结果，`node --test tests/api.test.mjs` 运行 API 测试。Sites 发布流程会将 `drizzle/` 中的迁移应用到托管数据库。GitHub 仓库只保存源码，在线服务及历史消息由 Sites 托管；单独启用 GitHub Pages 不会提供跨设备同步。
+- `web/`：房间列表、聊天页面、样式和浏览器逻辑。
+- `worker/index.js`：房间 API、密码验证、会话、限额和消息接口。
+- `drizzle/`：D1 数据库迁移。
+- `.openai/hosting.json`：Sites 项目 ID 和 D1 绑定。生产环境的 `ROOM_PEPPER` 是 Sites secret，不能提交到 Git。
+
+无需安装 npm 依赖。运行 `node scripts/build.mjs` 构建，`node scripts/validate-artifact.mjs` 验证打包结果，`node --test tests/api.test.mjs` 运行 API 测试。源码在 GitHub，在线服务和历史消息由 Sites 托管；单独启用 GitHub Pages 无法同步消息。
 
