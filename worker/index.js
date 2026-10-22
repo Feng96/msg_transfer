@@ -53,7 +53,11 @@ async function currentSession(request, env) {
   if (!row || row.expires_at <= Date.now()) return null;
   return { token, tokenHash };
 }
-async function grantRoom(request, env, roomId, existingSession = null) {
+function deviceLabel(value) {
+  const label = typeof value === "string" ? value.trim() : "";
+  return label && label.length <= 20 ? label : "未知设备";
+}
+async function grantRoom(request, env, roomId, label, eventType, existingSession = null) {
   const session = existingSession || await currentSession(request, env);
   const token = session?.token || randomToken(32);
   const tokenHash = session?.tokenHash || await sha256(token);
@@ -63,12 +67,18 @@ async function grantRoom(request, env, roomId, existingSession = null) {
   } else {
     await env.DB.prepare("INSERT INTO sessions (token_hash, created_at, expires_at) VALUES (?, ?, ?)").bind(tokenHash, now, now + maxSessionAge * 1000).run();
   }
-  await env.DB.prepare("INSERT OR IGNORE INTO room_grants (token_hash, room_id) VALUES (?, ?)").bind(tokenHash, roomId).run();
+  await env.DB.batch([
+    env.DB.prepare("INSERT OR IGNORE INTO room_grants (token_hash, room_id, device_label, granted_at, last_seen_at) VALUES (?, ?, ?, ?, ?)").bind(tokenHash, roomId, label, now, now),
+    env.DB.prepare("INSERT INTO room_access_events (room_id, device_label, event_type, occurred_at) VALUES (?, ?, ?, ?)").bind(roomId, label, eventType, now),
+  ]);
   return `mt_session=${token}; Max-Age=${maxSessionAge}; Path=/; HttpOnly; Secure; SameSite=Lax`;
 }
 async function hasGrant(env, session, roomId) {
   if (!session) return false;
-  const row = await env.DB.prepare("SELECT 1 AS allowed FROM room_grants WHERE token_hash = ? AND room_id = ?").bind(session.tokenHash, roomId).first();
+  const row = await env.DB.prepare("SELECT last_seen_at FROM room_grants WHERE token_hash = ? AND room_id = ?").bind(session.tokenHash, roomId).first();
+  if (row && row.last_seen_at < Date.now() - 300000) {
+    await env.DB.prepare("UPDATE room_grants SET last_seen_at = ? WHERE token_hash = ? AND room_id = ?").bind(Date.now(), session.tokenHash, roomId).run();
+  }
   return Boolean(row);
 }
 async function consumeLimit(env, key, max, intervalMs) {
@@ -141,7 +151,7 @@ async function rooms(request, env) {
   const pinHash = await hmac(env.ROOM_PEPPER, "room-pin:" + salt + ":" + pin);
   const now = Date.now();
   await env.DB.prepare("INSERT INTO rooms (id, name, pin_salt, pin_hash, created_at, last_message_at) VALUES (?, ?, ?, ?, ?, 0)").bind(id, name, salt, pinHash, now).run();
-  const cookie = await grantRoom(request, env, id);
+  const cookie = await grantRoom(request, env, id, deviceLabel(value?.deviceName), "created");
   return json({ room: { id, name, created_at: now, last_message_at: 0, unlocked: true } }, 201, { "set-cookie": cookie });
 }
 async function roomRoute(request, env, roomId, action) {
@@ -162,10 +172,60 @@ async function roomRoute(request, env, roomId, action) {
     if (!await consumeLimit(env, "pin-room:" + roomId, 100, 3600000)) return json({ error: "该房间暂时无法验证，请稍后再试" }, 429);
     const calculated = await hmac(env.ROOM_PEPPER, "room-pin:" + room.pin_salt + ":" + pin);
     if (!constantTimeEqual(calculated, room.pin_hash)) return json({ error: "房间密码错误" }, 401);
-    const cookie = await grantRoom(request, env, roomId, session);
+    const cookie = await grantRoom(request, env, roomId, deviceLabel(value?.deviceName), "entered", session);
     return json({ room: { id: room.id, name: room.name, unlocked: true } }, 200, { "set-cookie": cookie });
   }
   if (!await hasGrant(env, session, roomId)) return json({ error: "请先输入房间密码" }, 401);
+  if (action === "access" && request.method === "GET") {
+    const now = Date.now();
+    const grants = await env.DB.prepare(
+      "SELECT g.token_hash, g.device_label, g.granted_at, g.last_seen_at, s.created_at, s.expires_at FROM room_grants g JOIN sessions s ON s.token_hash = g.token_hash WHERE g.room_id = ? AND s.expires_at > ? ORDER BY g.last_seen_at DESC LIMIT 100"
+    ).bind(roomId, now).all();
+    const events = await env.DB.prepare(
+      "SELECT device_label, event_type, occurred_at FROM room_access_events WHERE room_id = ? ORDER BY occurred_at DESC, id DESC LIMIT 30"
+    ).bind(roomId).all();
+    return json({
+      devices: grants.results.map((grant) => ({
+        deviceName: grant.device_label,
+        grantedAt: grant.granted_at || grant.created_at,
+        lastSeenAt: grant.last_seen_at || grant.created_at,
+        expiresAt: grant.expires_at,
+        current: grant.token_hash === session.tokenHash,
+      })),
+      events: events.results.map((event) => ({ deviceName: event.device_label, type: event.event_type, at: event.occurred_at })),
+    });
+  }
+  if (action === "device-name" && request.method === "POST") {
+    const value = await readJson(request);
+    const label = typeof value?.deviceName === "string" ? value.deviceName.trim() : "";
+    if (!label || label.length > 20) return json({ error: "设备名称需为 1–20 个字符" }, 400);
+    await env.DB.prepare("UPDATE room_grants SET device_label = ? WHERE token_hash = ? AND room_id = ?").bind(label, session.tokenHash, roomId).run();
+    return json({ ok: true });
+  }
+  if (action === "change-pin" && request.method === "POST") {
+    const value = await readJson(request);
+    const oldPin = value?.oldPin;
+    const newPin = value?.newPin;
+    if (typeof oldPin !== "string" || !pinPattern.test(oldPin) || typeof newPin !== "string" || !pinPattern.test(newPin)) return json({ error: "请输入原密码和新的 6 位数字密码" }, 400);
+    if (oldPin === newPin) return json({ error: "新密码不能与原密码相同" }, 400);
+    const tag = await ipTag(request, env);
+    if (!await consumeLimit(env, "pin-ip:" + roomId + ":" + tag, 5, 15 * 60000)) return json({ error: "尝试次数过多，请 15 分钟后再试" }, 429);
+    if (!await consumeLimit(env, "pin-room:" + roomId, 100, 3600000)) return json({ error: "该房间暂时无法验证，请稍后再试" }, 429);
+    const calculated = await hmac(env.ROOM_PEPPER, "room-pin:" + room.pin_salt + ":" + oldPin);
+    if (!constantTimeEqual(calculated, room.pin_hash)) return json({ error: "原密码错误" }, 401);
+    const salt = randomToken(16);
+    const pinHash = await hmac(env.ROOM_PEPPER, "room-pin:" + salt + ":" + newPin);
+    const now = Date.now();
+    const grant = await env.DB.prepare("SELECT device_label FROM room_grants WHERE token_hash = ? AND room_id = ?").bind(session.tokenHash, roomId).first();
+    const label = grant?.device_label || "未知设备";
+    await env.DB.batch([
+      env.DB.prepare("UPDATE rooms SET pin_salt = ?, pin_hash = ? WHERE id = ?").bind(salt, pinHash, roomId),
+      env.DB.prepare("DELETE FROM room_grants WHERE room_id = ?").bind(roomId),
+      env.DB.prepare("INSERT INTO room_grants (token_hash, room_id, device_label, granted_at, last_seen_at) VALUES (?, ?, ?, ?, ?)").bind(session.tokenHash, roomId, label, now, now),
+      env.DB.prepare("INSERT INTO room_access_events (room_id, device_label, event_type, occurred_at) VALUES (?, ?, 'password_changed', ?)").bind(roomId, label, now),
+    ]);
+    return json({ ok: true, otherDevicesSignedOut: true });
+  }
   const roomKey = "room:" + roomId;
   if (action === "messages") {
     if (request.method === "GET") return listMessages(request, env, roomKey);
@@ -205,7 +265,7 @@ export default {
         if (request.method !== "GET" && !sameOrigin(request)) return json({ error: "跨站请求被拒绝" }, 403);
         if (pathname === "/api/rooms") return await rooms(request, env);
         if (pathname === "/api/legacy/messages") return await legacyRoute(request, env);
-        const match = pathname.match(/^\/api\/rooms\/([^/]+)(?:\/(unlock|messages|import-legacy))?$/);
+        const match = pathname.match(/^\/api\/rooms\/([^/]+)(?:\/(unlock|messages|import-legacy|access|device-name|change-pin))?$/);
         if (match) return await roomRoute(request, env, match[1], match[2] || null);
         return json({ error: "接口不存在" }, 404);
       }

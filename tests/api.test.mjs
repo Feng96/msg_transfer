@@ -8,7 +8,7 @@ const origin = "https://example.com";
 const clientId = "12345678-1234-1234-1234-123456789abc";
 function makeDb() {
   const sqlite = new DatabaseSync(":memory:");
-  for (const file of ["0000_messages.sql", "0001_rooms.sql"]) {
+  for (const file of ["0000_messages.sql", "0001_rooms.sql", "0002_room_access.sql"]) {
     const migration = readFileSync(new URL("../drizzle/" + file, import.meta.url), "utf8");
     sqlite.exec(migration.replaceAll("--> statement-breakpoint", ""));
   }
@@ -58,7 +58,7 @@ async function setup() {
   return { sqlite, DB, ROOM_PEPPER: "test-secret-is-not-a-production-secret" };
 }
 async function create(env, pin = "123456") {
-  const response = await worker.fetch(request("/api/rooms", { method: "POST", body: { name: "我的传输助手", pin } }), env);
+  const response = await worker.fetch(request("/api/rooms", { method: "POST", body: { name: "我的传输助手", pin, deviceName: "电脑" } }), env);
   assert.equal(response.status, 201);
   return { room: (await response.json()).room, cookie: response.headers.get("set-cookie").split(";")[0] };
 }
@@ -88,6 +88,40 @@ test("PIN is stored only as a keyed hash; room messages require a valid session"
   const secondCookie = unlocked.headers.get("set-cookie").split(";")[0];
   const read = await worker.fetch(request("/api/rooms/" + room.id + "/messages", { cookie: secondCookie }), env);
   assert.deepEqual((await read.json()).messages.map((message) => message.body), ["跨设备消息"]);
+});
+
+test("room access history and password change revoke other devices without exposing secrets", async () => {
+  const env = await setup();
+  const { room, cookie } = await create(env);
+  const path = "/api/rooms/" + room.id;
+  const joined = await worker.fetch(request(path + "/unlock", { method: "POST", ip: "192.0.2.22", body: { pin: "123456", deviceName: "手机" } }), env);
+  assert.equal(joined.status, 200);
+  const phoneCookie = joined.headers.get("set-cookie").split(";")[0];
+  const access = await worker.fetch(request(path + "/access", { cookie }), env);
+  assert.equal(access.status, 200);
+  const before = await access.json();
+  assert.deepEqual(before.devices.map((item) => item.deviceName).sort(), ["手机", "电脑"]);
+  assert.equal(before.events.length, 2);
+  assert.equal(JSON.stringify(before).includes("123456"), false);
+  assert.equal(JSON.stringify(before).includes("token_hash"), false);
+  assert.equal((await worker.fetch(request(path + "/access"), env)).status, 401);
+  const wrong = await worker.fetch(request(path + "/change-pin", { method: "POST", cookie, body: { oldPin: "000000", newPin: "654321" } }), env);
+  assert.equal(wrong.status, 401);
+  const changed = await worker.fetch(request(path + "/change-pin", { method: "POST", cookie, body: { oldPin: "123456", newPin: "654321" } }), env);
+  assert.equal(changed.status, 200);
+  assert.equal((await worker.fetch(request(path + "/messages", { cookie: phoneCookie }), env)).status, 401);
+  assert.equal((await worker.fetch(request(path + "/messages", { cookie }), env)).status, 200);
+  const after = await (await worker.fetch(request(path + "/access", { cookie }), env)).json();
+  assert.equal(after.devices.length, 1);
+  assert.equal(after.events[0].type, "password_changed");
+  const oldPin = await worker.fetch(request(path + "/unlock", { method: "POST", ip: "192.0.2.23", body: { pin: "123456" } }), env);
+  assert.equal(oldPin.status, 401);
+  const newPin = await worker.fetch(request(path + "/unlock", { method: "POST", ip: "192.0.2.23", body: { pin: "654321", deviceName: "手机" } }), env);
+  assert.equal(newPin.status, 200);
+  const renamed = await worker.fetch(request(path + "/device-name", { method: "POST", cookie, body: { deviceName: "家里的电脑" } }), env);
+  assert.equal(renamed.status, 200);
+  const named = await (await worker.fetch(request(path + "/access", { cookie }), env)).json();
+  assert.ok(named.devices.some((item) => item.current && item.deviceName === "家里的电脑"));
 });
 
 test("wrong PIN attempts are rate limited and legacy history can be imported once", async () => {

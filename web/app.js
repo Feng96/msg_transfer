@@ -25,6 +25,7 @@
   const seen = new Set();
   const dayLabel = (date) => new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric" }).format(date);
   const timeLabel = (date) => new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(date);
+  const dateTimeLabel = (value) => new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 
   async function api(path, options = {}) {
     const response = await fetch(path, {
@@ -354,6 +355,71 @@
       catch { notify("分享失败，请复制地址栏中的房间地址"); }
     }
   }
+  function accessRow(title, detail) {
+    const row = document.createElement("div");
+    row.className = "access-row";
+    const strong = document.createElement("strong");
+    strong.textContent = title;
+    const small = document.createElement("small");
+    small.textContent = detail;
+    row.append(strong, small);
+    return row;
+  }
+  async function loadAccess() {
+    if (!currentRoom) return;
+    const roomId = currentRoom.id;
+    try {
+      const value = await api("/api/rooms/" + roomId + "/access");
+      if (currentRoom?.id !== roomId || !$('settings-dialog').open) return;
+      const devices = $("access-devices");
+      devices.replaceChildren();
+      if (!value.devices.length) devices.textContent = "暂无授权设备";
+      for (const item of value.devices) devices.append(accessRow(item.deviceName + (item.current ? " · 当前设备" : ""), "进入 " + dateTimeLabel(item.grantedAt) + " · 最近活动 " + dateTimeLabel(item.lastSeenAt)));
+      const events = $("access-events");
+      events.replaceChildren();
+      if (!value.events.length) events.textContent = "暂无访问记录";
+      const eventLabels = { created: "创建房间", entered: "进入房间", password_changed: "修改密码" };
+      for (const item of value.events) events.append(accessRow(item.deviceName + " · " + (eventLabels[item.type] || "访问房间"), dateTimeLabel(item.at)));
+    } catch (error) {
+      if (error.status === 401) {
+        $("settings-dialog").close();
+        unauthorized(error);
+      } else $("access-devices").textContent = "加载失败：" + error.message;
+    }
+  }
+  function openSettings() {
+    if (!currentRoom) return;
+    $("change-pin-form").reset();
+    $("change-pin-error").textContent = "";
+    $("access-devices").textContent = "正在加载…";
+    $("access-events").textContent = "正在加载…";
+    $("settings-dialog").showModal();
+    loadAccess();
+  }
+  async function changePin(event) {
+    event.preventDefault();
+    if (!currentRoom) return;
+    const oldPin = $("old-pin").value;
+    const newPin = $("new-pin").value;
+    const confirmation = $("new-pin-confirm").value;
+    $("change-pin-form").reset();
+    if (!/^[0-9]{6}$/.test(oldPin) || !/^[0-9]{6}$/.test(newPin) || newPin !== confirmation) {
+      $("change-pin-error").textContent = "请检查原密码和两次新密码";
+      return;
+    }
+    $("submit-change-pin").disabled = true;
+    try {
+      await api("/api/rooms/" + currentRoom.id + "/change-pin", { method: "POST", body: JSON.stringify({ oldPin, newPin }) });
+      $("change-pin-error").textContent = "";
+      notify("密码已修改，其他设备需重新进入");
+      await loadAccess();
+    } catch (error) {
+      if (error.status === 401 && error.message !== "原密码错误") {
+        $("settings-dialog").close();
+        unauthorized(error);
+      } else $("change-pin-error").textContent = error.message;
+    } finally { $("submit-change-pin").disabled = false; }
+  }
   function openCreate() {
     $("create-form").reset();
     $("create-error").textContent = "";
@@ -373,7 +439,7 @@
     $("confirm-pin").value = "";
     $("submit-create").disabled = true;
     try {
-      const value = await api("/api/rooms", { method: "POST", body: JSON.stringify({ name, pin }) });
+      const value = await api("/api/rooms", { method: "POST", body: JSON.stringify({ name, pin, deviceName }) });
       $("create-dialog").close();
       rooms.unshift(value.room);
       renderRooms();
@@ -389,7 +455,7 @@
     $("unlock-pin").value = "";
     $("submit-unlock").disabled = true;
     try {
-      const value = await api("/api/rooms/" + pendingRoom.id + "/unlock", { method: "POST", body: JSON.stringify({ pin }) });
+      const value = await api("/api/rooms/" + pendingRoom.id + "/unlock", { method: "POST", body: JSON.stringify({ pin, deviceName }) });
       const room = { ...pendingRoom, ...value.room, unlocked: true };
       rooms = rooms.map((item) => item.id === room.id ? room : item);
       $("unlock-dialog").close();
@@ -424,6 +490,9 @@
   $("unlock-form").addEventListener("submit", unlockRoom);
   $("back-home").addEventListener("click", () => showHome());
   $("share-button").addEventListener("click", share);
+  $("settings-button").addEventListener("click", openSettings);
+  $("close-settings").addEventListener("click", () => $("settings-dialog").close());
+  $("change-pin-form").addEventListener("submit", changePin);
   $("import-legacy").addEventListener("click", importLegacy);
   $("composer-form").addEventListener("submit", (event) => { event.preventDefault(); send(); });
   input.addEventListener("keydown", (event) => {
@@ -431,13 +500,20 @@
   });
   input.addEventListener("input", resize);
   $("name-button").addEventListener("click", () => { $("device-name").value = deviceName; $("name-dialog").showModal(); });
-  $("name-form").addEventListener("submit", (event) => {
-    if (event.submitter?.value !== "save") return;
+  $("name-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (event.submitter?.value !== "save") { $("name-dialog").close(); return; }
     const next = $("device-name").value.trim();
     if (next) {
       deviceName = next.slice(0, 20);
       localStorage.setItem("transfer-device-name", deviceName);
-      notify("设备名称已保存");
+      $("name-dialog").close();
+      if (currentRoom) {
+        try {
+          await api("/api/rooms/" + currentRoom.id + "/device-name", { method: "POST", body: JSON.stringify({ deviceName }) });
+          notify("设备名称已保存");
+        } catch { notify("本机名称已保存，房间记录更新失败"); }
+      } else notify("设备名称已保存");
     }
   });
   window.addEventListener("online", loadNew);
