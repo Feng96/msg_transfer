@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f7f8fa">
+  <meta name="description" content="用一个私密链接，在手机和电脑之间同步文字消息。">
+  <title>消息传输助手</title>
+  <style>/* STYLE */</style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">↗</span><span>消息传输助手</span></div>
+      <div class="side-label">我的聊天</div>
+      <div class="room-tile"><span class="room-icon">↗</span><span><strong>文件传输助手</strong><small>跨设备同步文字消息</small></span></div>
+      <div class="side-help"><strong>同一个链接，同一段对话</strong><p>将完整房间链接发到另一台设备，即可查看历史并继续发送。任何拿到链接的人都能访问，请妥善保管。</p><button id="side-copy" type="button">复制房间链接 →</button></div>
+    </aside>
+    <main class="chat">
+      <header class="topbar">
+        <div class="title-wrap"><span class="chat-icon">↗</span><div><h1>文件传输助手</h1><div class="status"><span class="status-dot" id="status-dot"></span><span id="status-text">正在连接…</span></div></div></div>
+        <div class="top-actions">
+          <button class="button" type="button" id="name-button" title="设备名称" aria-label="设置设备名称"><span class="button-icon">♙</span><span class="button-label">设备名称</span></button>
+          <button class="button button-primary" type="button" id="share-button" title="分享房间链接" aria-label="分享房间链接"><span class="button-icon">↗</span><span class="button-label">分享链接</span></button>
+        </div>
+      </header>
+      <section class="messages" id="messages" aria-label="聊天记录">
+        <div class="message-list" id="message-list">
+          <div class="intro" id="intro"><div class="intro-art">↗</div><h2>让消息在设备间自由流转</h2><p>在下方输入第一条消息。分享这个房间的完整链接，就能在手机和电脑上查看同一段聊天。</p><button class="button button-primary" type="button" id="intro-share">复制房间链接</button></div>
+        </div>
+      </section>
+      <form class="composer-wrap" id="composer-form"><div class="composer"><textarea id="message-input" placeholder="输入消息，按 Enter 发送…" maxlength="4000" rows="1" aria-label="输入消息"></textarea><button class="send" id="send-button" type="submit" aria-label="发送消息">➤</button></div><div class="composer-note"><span id="composer-status">Enter 发送 · Shift + Enter 换行</span><span>最多 4000 字</span></div></form>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <dialog id="name-dialog"><form method="dialog" id="name-form"><h2>设备名称</h2><p>帮助你区分手机和电脑发来的消息。这个名称只会显示在当前房间里。</p><label for="device-name">名称</label><input id="device-name" maxlength="20" autocomplete="off" placeholder="例如：我的手机"><div class="dialog-actions"><button class="button" value="cancel">取消</button><button class="button button-primary" value="save">保存</button></div></form></dialog>
+  <script>/* SCRIPT */</script>
+</body>
+</html>
+
